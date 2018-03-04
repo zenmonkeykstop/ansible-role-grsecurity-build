@@ -14,6 +14,36 @@
         that:
           - grsecurity_build_download_username != ''
           - grsecurity_build_download_password != ''
+    #
+    # The following will ensure everything is in place for the kernel to be compiled
+    # and ensure full spectre mitigations.
+    # This includes:
+    #     - Kernel config must have Retpoline mitgation active
+    #     - GCC version must have Retpoline support
+    #
+    - name: Fetch running kernel version
+      shell: uname -r
+      register: running_kernel
+
+    - name: Inspect kernel configuration for presence of Retpoline setting
+      shell: cat /boot/config-{{ running_kernel.stdout }} | grep "CONFIG_RETPOLINE=y"
+      register: retpoline_enabled
+      failed_when: "retpoline_enabled.rc == 2"
+
+    - name: Assert that RETPOLINE is enabled
+      assert:
+        that: retpoline_enabled.rc == 0
+        msg: "For full spectre v2 mitigations, the kernel must be compiled on a Retpoline-enabled kernel."
+
+    - name: Fetch gcc version
+      shell: gcc --version | awk 'NR==1{print $4}'
+      register: gcc_version
+
+    - name: Assert that gcc version has RETPOLINE support
+      assert:
+        that: gcc_version.stdout | version_compare('4.8.4', '>=')
+        msg: "For full spectre v2 mitigations, the kernel must be compiled a version of gcc that has Retpoline support"
+
   roles:
     - role: ansible-role-grsecurity-build
       grsecurity_build_patch_type: stable2

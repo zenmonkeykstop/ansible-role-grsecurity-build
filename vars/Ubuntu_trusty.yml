@@ -3,6 +3,7 @@ grsecurity_build_apt_packages:
   - bc
   - build-essential
   - fakeroot
+  - g++-4.8
   - gcc-4.8
   - gcc-4.8-plugin-dev
   - kernel-package

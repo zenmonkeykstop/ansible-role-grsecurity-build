@@ -2,8 +2,107 @@
 - name: Prepare
   hosts: all
   gather_facts: False
+  vars:
+    molecule_scenario_directory: "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}"
   tasks:
     - name: Install python for Ansible
       raw: test -e /usr/bin/python || (apt -y update && apt install -y python-minimal)
       become: True
       changed_when: False
+    # Install 4.4 kernel from apt.freedom.press to have a Retpoline enabled kernel.
+    # and reboot for converge/compilation process.
+    # The following is ported from SecureDrop's grsecurity install logic. The goal is to use
+    # a Retpoline-enabled kernel and gcc compiler to compile a kernel with enabled Retpoline
+    # for complete Spectre v2 mitigations. Currently we must use apt-test as apt.freedom.press and
+    # default ubuntu 14.04 vagrant box do not yet have a Spectre-mitigated kernels.
+    - name: Install paxctl.
+      apt:
+        pkg: paxctl
+        state: present
+      become: true
+
+    - name: Check paxctl headers on grub binaries.
+      command: paxctl -vQ {{ item }}
+      # Read-only task, so don't report changed
+      changed_when: false
+      # The first time this task is run, the grub binaries won't have
+      # their headers converted yet, which will cause paxctl to exit 1.
+      # We'll catch that error and respond accordingly in the next task.
+      failed_when: false
+      register: paxctl_grub_header_check
+      with_items:
+        - /usr/sbin/grub-probe
+        - /usr/sbin/grub-mkdevicemap
+        - /usr/bin/grub-script-check
+      become: True
+
+    - name: Adjust paxctl headers on grub binaries.
+      command: paxctl -zCE {{ item.item }}
+      with_items: "{{ paxctl_grub_header_check.results }}"
+      when: "item.stdout != '- PaX flags: --------E--- [{{ item.item }}]' or
+             item.rc != 0"
+      become: True
+
+    # apt-test for now. Swap for non-test repo when 4.4 kernels are pushed to prod.
+    - name: Copy apt-test key
+      copy:
+        src: "{{molecule_scenario_directory}}/../../files/fpf-apt-test.asc"
+        dest: /home/vagrant/apt-test.key
+
+    - name: Install SecureDrop apt-test repo GPG signing key.
+      apt_key:
+        state: present
+        file: "/home/vagrant/apt-test.key"
+      become: True
+
+    - name: Setup FPF apt-test repo.
+      apt_repository:
+        repo: deb [arch=amd64] https://apt-test.freedom.press trusty main
+        state: present
+        update_cache: yes
+      become: True
+
+    - name: Install the securedrop-keyring package for managing the apt gpg key.
+      apt:
+        pkg: securedrop-keyring
+        state: present
+      become: True
+
+    - name: Install the securedrop-kernel metapackagage to install grsecurity-hardened kernel
+      apt:
+        pkg: securedrop-grsec
+        state: present
+      become: True
+
+    - name: Get grsec kernel string from grub config.
+      shell: grep menuentry /boot/grub/grub.cfg | grep grsec | grep -v recovery | head -1 | cut -d "'" -f2
+      changed_when: false
+      register: grsec_str
+
+    - name: Check initial default grub entry for next boot.
+      stat:
+        path: /boot/grub/grubenv
+      register: grubenv_check_initial_result
+
+    - name: Set grsec kernel as default for next boot.
+      command: grub-reboot "Advanced options for Ubuntu>{{ grsec_str.stdout }}"
+      # The grub-reboot command writes to /boot/grub/grubenv,
+      # so "changed" status can only be determined by comparing
+      # checksums on that file. We'll do so in the subsequent task.
+      changed_when: false
+
+      # Kludge to detect changes accurately from the `grub-reboot` command
+      # in the previous task. We're just comparing checksums on the
+      # /boot/grub/grubenv file before and after the command, since that's
+      # where `grub-reboot` writes its changes. Hopefully a future version
+      # of Ansible will provide an `args: changes:` parameter to command calls.
+    - name: Check customized default grub entry for next boot.
+      stat:
+        path: /boot/grub/grubenv
+      register: grubenv_check_configured_result
+      changed_when: grubenv_check_initial_result.stat.checksum !=
+                    grubenv_check_configured_result.stat.checksum
+
+    - name: Reboot due to kernel update.
+      command: shutdown -r now
+      become: True
